@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ollama 演示 · 下载 / 调用 / 对外服务</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, "Microsoft YaHei", sans-serif; background: #f5f6fa; color: #222; }
+  header { background: #185fa5; color: #fff; padding: 14px 20px; }
+  header h1 { margin: 0; font-size: 18px; font-weight: 500; }
+  header p { margin: 4px 0 0; font-size: 13px; opacity: .85; }
+  .wrap { max-width: 900px; margin: 18px auto; padding: 0 16px; }
+  .panel { background: #fff; border: 1px solid #e3e6ef; border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; }
+  .panel h2 { font-size: 15px; font-weight: 500; margin: 0 0 10px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, button, select { font-size: 14px; padding: 8px 10px; border-radius: 8px; border: 1px solid #cfd6e4; }
+  input { flex: 1; min-width: 160px; }
+  button { background: #185fa5; color: #fff; border: none; cursor: pointer; }
+  button.alt { background: #0f6e56; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #box { height: 320px; overflow-y: auto; background: #fafbfe; border: 1px solid #e3e6ef; border-radius: 8px; padding: 10px; font-size: 14px; line-height: 1.6; }
+  .msg { margin: 6px 0; }
+  .msg b { color: #185fa5; }
+  #log { height: 120px; overflow-y: auto; background: #0c1b2a; color: #9fe1cb; font-family: monospace; font-size: 12px; padding: 8px; border-radius: 8px; white-space: pre-wrap; }
+  .tip { font-size: 12px; color: #666; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ollama 模型下载 / 调用 / 对外服务 演示</h1>
+  <p>① 下载模型　② 调用模型对话　③ 本页面本身就是对外暴露的 HTTP 服务</p>
+</header>
+
+<div class="wrap">
+
+  <div class="panel">
+    <h2>① 下载模型（对外服务 /pull）</h2>
+    <div class="row">
+      <input id="model" placeholder="模型名，例如 qwen3:8b" value="qwen3:8b" />
+      <button class="alt" id="pullBtn" onclick="pullModel()">下载 / 拉取</button>
+    </div>
+    <div id="log">等待操作…</div>
+    <div class="tip">内部执行 <code>ollama pull &lt;model&gt;</code>，以流式回传进度。</div>
+  </div>
+
+  <div class="panel">
+    <h2>② 调用模型对话（对外服务 /chat）</h2>
+    <div class="row">
+      <select id="modelSel"><option value="qwen3:8b">qwen3:8b</option></select>
+      <button onclick="refreshModels()">刷新模型列表</button>
+    </div>
+    <div id="box"></div>
+    <div class="row" style="margin-top:8px;">
+      <input id="input" placeholder="输入消息，回车发送" onkeydown="if(event.key==='Enter')send()" />
+      <button onclick="send()">发送</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const box = document.getElementById('box');
+const log = document.getElementById('log');
+let history = [];
+
+function pullModel() {
+  const m = document.getElementById('model').value.trim();
+  if (!m) return;
+  document.getElementById('pullBtn').disabled = true;
+  log.textContent = '开始下载 ' + m + ' ...\n';
+  const es = new EventSource('/pull?_=' + Date.now());
+  fetch('/pull', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ model: m }) });
+  // 用 fetch + stream 读取 SSE 更简单，这里改用 fetch 读流
+  fetch('/pull', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ model: m }) })
+    .then(r => r.body.getReader())
+    .then(reader => {
+      const dec = new TextDecoder(); let buf = '';
+      function pump() { return reader.read().then(({done, value}) => {
+        if (done) { return; }
+        buf += dec.decode(value, {stream:true});
+        const parts = buf.split('\n\n'); buf = parts.pop();
+        parts.forEach(p => {
+          if (p.startsWith('data: ')) {
+            try { const o = JSON.parse(p.slice(6)); log.textContent += (o.log || o.status || '') + '\n'; log.scrollTop = log.scrollHeight; }
+            catch(e) {}
+          }
+        });
+        return pump();
+      }); }
+      return pump();
+    })
+    .finally(() => { document.getElementById('pullBtn').disabled = false; refreshModels(); });
+}
+
+function refreshModels() {
+  fetch('/models').then(r => r.json()).then(d => {
+    const sel = document.getElementById('modelSel');
+    const list = (d.models || []).map(x => x.name);
+    if (!list.length) return;
+    sel.innerHTML = list.map(n => `<option value="${n}">${n}</option>`).join('');
+  }).catch(() => {});
+}
+
+function send() {
+  const input = document.getElementById('input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  const model = document.getElementById('modelSel').value;
+  history.push({ role: 'user', content: text });
+  box.innerHTML += `<div class="msg"><b>你：</b>${escapeHtml(text)}</div>`;
+  box.innerHTML += `<div class="msg"><b>${model}：</b><span id="stream"></span></div>`;
+  box.scrollTop = box.scrollHeight;
+  const streamEl = document.getElementById('stream');
+
+  fetch('/chat', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ model, messages: history }) })
+    .then(r => r.body.getReader())
+    .then(reader => {
+      const dec = new TextDecoder(); let buf = '', acc = '';
+      function pump() { return reader.read().then(({done, value}) => {
+        if (done) { history.push({ role: 'assistant', content: acc }); return; }
+        buf += dec.decode(value, {stream:true});
+        buf.split('\n').forEach(line => {
+          if (!line.trim()) return;
+          try {
+            const o = JSON.parse(line);
+            const c = (o.message && o.message.content) || '';
+            acc += c; streamEl.textContent = acc; box.scrollTop = box.scrollHeight;
+          } catch(e) {}
+        });
+        buf = buf.includes('\n') ? buf.slice(buf.lastIndexOf('\n')+1) : buf;
+        return pump();
+      }); }
+      return pump();
+    });
+}
+
+function escapeHtml(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+refreshModels();
+</script>
+</body>
+</html>
