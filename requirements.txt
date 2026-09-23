@@ -1,0 +1,5 @@
+# 本项目为零第三方依赖演示，仅使用 Python 3.8+ 标准库。
+# 运行前只需确保本机已安装并启动 Ollama（https://ollama.com）。
+#
+# 如需可联网拉取官方库中的模型，请保证能访问 registry.ollama.com；
+# 国内网络若 ollama.com 直连异常，可改用镜像或由安装包离线安装。
